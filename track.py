@@ -30,6 +30,7 @@ from yolov5.utils.torch_utils import select_device, time_sync
 from yolov5.utils.plots import Annotator, colors, save_one_box
 from deep_sort.utils.parser import get_config
 from deep_sort.deep_sort import DeepSort
+from yolov5.utils.objectDetected import ObjectDetected
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # yolov5 deepsort root directory
@@ -140,6 +141,10 @@ def detect(opt):
         pred = non_max_suppression(pred, opt.conf_thres, opt.iou_thres, opt.classes, opt.agnostic_nms, max_det=opt.max_det)
         dt[2] += time_sync() - t3
 
+
+        crosswalk_boxes = []
+        vechicle_boxes = []
+
         # Process detections
         for i, det in enumerate(pred):  # detections per image
             seen += 1
@@ -165,7 +170,7 @@ def detect(opt):
             s += '%gx%g ' % im.shape[2:]  # print string
             imc = im0.copy() if save_crop else im0  # for save_crop
 
-            annotator = Annotator(im0, line_width=2, pil=not ascii)
+            annotator = Annotator(im0, line_width=1, pil=not ascii)
 
             if det is not None and len(det):
                 # Rescale boxes from img_size to im0 size
@@ -208,8 +213,23 @@ def detect(opt):
 
                         if save_vid or save_crop or show_vid:  # Add bbox to image
                             c = int(cls)  # integer class
-                            label = f'{id:0.0f} {names[c]} {conf:.2f}'
+                            # label = f'{id:0.0f} {names[c]} {conf:.2f}'
+
+                            class_name = names[c].lower()
+                            label = ''
+                            if class_name == 'crosswalk':
+                                label = f'{class_name}'
+                            else:
+                                label = f'{id:0.0f} {class_name}'
                             annotator.box_label(bboxes, label, color=colors(c, True))
+
+                            obj_detected = ObjectDetected(class_name, annotator.p1, annotator.p2, int(id))
+                            # Check overlap vechicle with crosswalk
+                            if obj_detected.class_name == 'crosswalk':
+                                crosswalk_boxes.append(obj_detected)
+                            else:
+                                vechicle_boxes.append(obj_detected)
+
                             if save_crop:
                                 txt_file_name = txt_file_name if (isinstance(path, list) and len(path) > 1) else ''
                                 save_one_box(bboxes, imc, file=save_dir / 'crops' / txt_file_name / names[c] / f'{id}' / f'{p.stem}.jpg', BGR=True)
@@ -222,9 +242,24 @@ def detect(opt):
 
             # Stream results
             im0 = annotator.result()
+
+            # scale_percent = 150 # percent of original size
+            # width = int(im0.shape[1] * scale_percent / 100)
+            # height = int(im0.shape[0] * scale_percent / 100)
+            # dim = (width, height)
+
+            # # resize image
+            # resized = cv2.resize(im0, dim, interpolation = cv2.INTER_AREA)
+            # im0 = resized
+
+            
+            result = check_traffic_violation(im0, vechicles=vechicle_boxes, crosswalks=crosswalk_boxes)
+            im0 = result
+
             if show_vid:
-                cv2.imshow(str(p), im0)
-                cv2.waitKey(1)  # 1 millisecond
+                # cv2.imshow(str(p), im0)
+                cv2.imshow("Result image", im0)
+                cv2.waitKey(50)  # 1 millisecond
 
             # Save results (image with detections)
             if save_vid:
@@ -252,6 +287,28 @@ def detect(opt):
     if update:
         strip_optimizer(yolo_model)  # update model (to fix SourceChangeWarning)
 
+
+def check_traffic_violation(img, vechicles, crosswalks):
+    for crosswalk in crosswalks:
+        for vechicle in vechicles:
+            vleft, vright = vechicle.p1[0], vechicle.p2[0]
+            cleft, cright = crosswalk.p1[0], crosswalk.p2[0]
+            vtop, vbot = vechicle.p1[1], vechicle.p2[1]
+            ctop, cbot = crosswalk.p1[1], crosswalk.p2[1]
+
+            if (vbot > ctop) and vleft >= cleft and vright <= cright:
+                traffic_violence_box(img, vechicle.p1, vechicle.p2)
+    
+    return img
+
+def traffic_violence_box(img, p1, p2):
+    x, y, w, h = p1[0], p1[1], p2[0]-p1[0], p2[1]-p1[1]
+
+    sub_img = img[y:y+h, x:x+w]
+    white_rect = np.ones(sub_img.shape, dtype=np.uint8) * 255
+
+    res = cv2.addWeighted(sub_img, 0.5, white_rect, 0.5, 1.0)
+    img[y:y+h, x:x+w] = res
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
